@@ -415,7 +415,7 @@
           (async/>! results-chan result))
         (increment :num-processed)
         (recur))
-      (stderr (format "worker %s' exiting" my-id))))
+      (stderr (format "worker %s exiting" my-id))))
   nil)
 
 
@@ -470,7 +470,7 @@
       :else (throw (RuntimeException. "given argument is neither a url nor a manuscript id")))))
 
 (defn -main
-  [args]
+  [& args]
   (let [[iiif-url msid] (parse-args args)]
 
     (stderr "starting image search")
