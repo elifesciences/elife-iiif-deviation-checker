@@ -7,27 +7,6 @@
    [clojure.core.async :as async :refer [<! >! go-loop]]
    [cheshire.core :as json]))
 
-;; while developing it's easier to talk to the remote iiif server
-;; it's also a good idea to preserve the image cache because we'll
-;; probably be hitting the same set of images again and again
-(def dev? true)
-
-(def cache-root "")
-(def cache-dir (-> cache-root (str "cache") java.io.File. .getAbsolutePath str))
-(def image-cache-dir (-> cache-root (str "image-cache") java.io.File. .getAbsolutePath str))
-(def clear-cache (not dev?)) ;; set to false to preserve cache (good for debugging)
-
-;; number of parallel image processors to run.
-;; keep it to one per-core. any more and you won't see any great returns.
-(def num-processors (-> (Runtime/getRuntime) .availableProcessors))
-;;(def report-timeout 5000) ;; in ms. this should be the max amount of time to process an image, including download
-
-;; hit the production iiif server for image requests.
-;; (good for debugging)
-(def use-prod-iiif dev?)
-
-;;
-
 (defn json-parse-string
   [string]
   (json/parse-string string true))
@@ -39,13 +18,22 @@
     (when (.exists report-file)
       (with-open [rdr (clojure.java.io/reader report-file)]
         (into {} (mapv (fn [result]
-                         (let [result (:message (json/parse-string result true))]
+                         (let [result (:message (json-parse-string result))]
                            [(:uri (:source result)) (:md5 result)]))
                        (line-seq rdr)))))))
 
 (def report-idx (read-report))
 
-;; ---
+(def cache-root "")
+(def cache-dir (-> cache-root (str "cache") java.io.File. .getAbsolutePath str))
+(def image-cache-dir (-> cache-root (str "image-cache") java.io.File. .getAbsolutePath str))
+(def clear-image-cache true) ;; set to false to preserve image cache (good for debugging)
+
+;; number of parallel image processors to run, one per-core
+(def num-processors (-> (Runtime/getRuntime) .availableProcessors))
+
+;; hit the production iiif server for image requests. (good for debugging)
+(def use-prod-iiif true)
 
 ;; create our cache dirs, if they don't already exist
 (-> cache-dir java.io.File. .mkdirs)
@@ -68,17 +56,12 @@
          :num-deviations 0
          :num-errors 0}))
 
+;; utils
+
 (defn increment
   "helper function that bumps stats"
   [what]
   (swap! stats update-in [what] inc))
-
-
-;; utils
-
-(defn pformat
-  [arg]
-  (with-out-str (clojure.pprint/pprint arg)))
 
 (let [lock (Object.)]
   (defn stderr
@@ -225,7 +208,7 @@
 
         ;; these are lazy fetches and won't actually happen until we hit `find-images` below
         article-id-list (->> csv-data rest (map first))
-        article-list (map get-article (take 10 article-id-list))]
+        article-list (map get-article (take 15 article-id-list))]
 
     ;; images are embedded throughout the article-json. we need to visit every value and look for these:
     ;; {"assets" [
@@ -252,6 +235,8 @@
   (async/go
     (articles)
     ;; digests?
+    ;; no more data to scrape, signal the chan to close
+    (async/close! image-chan)
     ))
 
 (defn find-single-image
@@ -277,14 +262,14 @@
   Call to ImageMagick is wrapped in a 'timeout' of a 20 seconds with a --kill after 40 seconds.
   If you're running this script without a swap disk, and somehow manage to max out your ram and
   the kernel oom killer hasn't run yet, 'timeout' will catch you."
-  [image-path-1 image-path-2]
-  (let [output-path (str (java.io.File/createTempFile "devtester" ".jpg"))
+  [image-path-1 image-path-2 & [attempt]]
+  (let [output-path (str (java.io.File/createTempFile "devchk" ".jpg"))
 
         {:keys [exit err out]}
         (sh "timeout" "--kill-after=40s" "20s"
             ;;"magick" "compare" "-metric" "pae" ;; IM 7 only. ubuntu 18.04 still on IM 6
             "compare" "-metric" "pae"
-            "-quiet" ;; further options go here
+            "-quiet"
             image-path-1 image-path-2 output-path)
 
         ;; 'ae' is Absolute Error - the number of pixels that are different between the two
@@ -296,19 +281,27 @@
         [ae pae] (rest (re-matches #"(\d+) \((\d\.\d+)\)" err))
 
         pae (some-> pae java.lang.Float/valueOf)]
-    (when (> exit 1)
-      ;; image magick died. probably because iiif died and returned text
-      (increment :num-errors)
-      (log :error "imagemagick return an exit code greater than 1"
-           {:stderr err
-            :stdout out
-            :exit exit
-            :image-1 image-path-1
-            :image-2 image-path-2}))
-    {:pae pae
-     :cache {:local-comparison-file output-path
-             :local-original-file image-path-1
-             :local-iiif-file image-path-2}}))
+    
+    (cond
+      ;; first failure, try again
+      (and (> exit 1)
+           (= attempt nil)) (compare-images image-path-1 image-path-2 2)
+
+      ;; image magick died. probably because iiif died and returned text.
+      ;; this isn't the first attempt either. log an error
+      (> exit 1) (do
+                   (increment :num-errors)
+                   (log :error "imagemagick return an exit code greater than 1"
+                        {:stderr err
+                         :stdout out
+                         :exit exit
+                         :image-1 image-path-1
+                         :image-2 image-path-2})))
+
+      {:pae pae
+       :cache {:local-comparison-file output-path
+               :local-original-file image-path-1
+               :local-iiif-file image-path-2}}))
 
 (defn image-cache-path
   "images must be stored on the disk long enough to compare them with the iiif derived image.
@@ -359,41 +352,37 @@
         prepend-s3)))
 
 (defn image-meta
+  "returns additional image data"
   [image-path]
   (let [img-obj (java.io.File. image-path)]
     {:bytes (.length img-obj)
      :md5 (first (split (:out (sh "md5sum" "--binary" image-path)) #" "))}))
 
-(defn retry-on-nil
-  "calls `f` again if it returned `nil`."
-  [f]
-  (or (f) (f)))
-
 (defn -process-image
+  "given an image, generates urls, downloads the images, compares them, tacks on extra image data and returns a map of results"
   [image]
   (let [iiif-url (-> image :source :uri)]
     (if (contains? report-idx iiif-url)
-      nil ;;(stderr "skipping" iiif-url)
+      (log :debug "skipping" iiif-url) ;; already have a result for this one
+
       (let [original-image-url (iiif-to-s3-url iiif-url)
-
-            ;; we don't want to DOS the remote iiif server, put it all through the local instance
+            original-image (download-image original-image-url)
             local-iiif-url (str "http://localhost" (-> iiif-url java.net.URL. .getPath))
+            iiif-image (download-image (if use-prod-iiif iiif-url local-iiif-url))]
 
-            iiif-image (download-image (if use-prod-iiif iiif-url local-iiif-url))
-            original-image (download-image original-image-url)]
+        (cond
+          (not iiif-image) (log :error "problem downloading iiif image:" {:iiif-image iiif-image})
+          (not original-image) (log :error "problem downloading original image:" {:original-image original-image})
 
-        (when-not iiif-image
-          (log :error "problem downloading iiif image" {:iiif-image iiif-image}))
-        (when-not original-image
-          (log :error "problem downloading original image" {:original-image original-image}))
+          :else
+          (let [;;iiif-meta (image-meta iiif-image)
+                ;;iiif-meta (assoc iiif-meta :local-uri local-iiif-url)
+                iiif-meta (-> iiif-image image-meta (assoc :local-uri local-iiif-url))
 
-        (when (and iiif-image original-image)
-          (let [iiif-meta (image-meta iiif-image)
-                iiif-meta (assoc iiif-meta :local-uri local-iiif-url)
                 original-meta (image-meta original-image)
 
                 article-id (->> iiif-url (re-find #"elife\-(\d{5})\-") last java.lang.Integer/valueOf)
-                comparison-results (retry-on-nil #(compare-images original-image iiif-image))
+                comparison-results (compare-images original-image iiif-image)
 
                 result (merge image original-meta)
                 result (merge result {:uri original-image-url :article-id article-id})
@@ -401,20 +390,30 @@
                 result (merge result comparison-results)]
             result))))))
 
+(defn process-image
+  "guard function"
+  [image]
+  (try
+    (-process-image image)
+    (catch Exception uncaught-exc
+      (log :error "uncaught exception processing image" {:image image})
+      (increment :num-errors))))
 
-(defn process-images
+(defn image-processor
   "this will take images off of `image-chan` and 'processes' them - runs each image through a series of tests.
   the results are put on the `results-chan`."
   [my-id]
-  ;; poll for image data forever, the reporter will get impatient and kill us eventually
+  (stderr "started image processor" my-id)
   (async/go-loop []
     (if-let [image (async/<! image-chan)]
-      (let [result (-process-image image)]
+      (let [result (process-image image)]
         (when result
           (log :debug (str "processor:" my-id " - processing image - " (:label image)))
           (async/>! results-chan result))
         (increment :num-processed)
         (recur))
+
+      ;; received nil, no more results on this channel, exit
       (stderr (format "worker %s exiting" my-id))))
   nil)
 
@@ -423,11 +422,11 @@
 
 
 (defn report
-  "this will take results off of `results-chan` and write a report to stdout periodically.
-  we do this on the main thread so it blocks us from exiting until the channels have been drained of results."
+  "this takes results off of `results-chan` and write a report to stdout periodically.
+  we do this on the main thread so it blocks us from exiting until we have no more results left."
   []
   (loop []
-    (let [result (async/<!! results-chan)]
+    (when-let [result (async/<!! results-chan)]
 
       ;; check for deviations
       (if (or (= (:pae result) 1)
@@ -435,7 +434,7 @@
         (increment :num-deviations)
 
         ;; no errors to investigate, delete the cached files
-        (when clear-cache
+        (when clear-image-cache
           (some-> result :cache :local-comparison-file delete-file)
           (some-> result :cache :local-iiif-file delete-file)
           (some-> result :cache :local-original-file delete-file)))
@@ -453,11 +452,6 @@
         (when-not (= num-remaining 0)
           ;; jobs outstanding, pull next job channel
           (recur))))))
-  
-  ;; now that we're capturing stats we can know if there are any remaining rather than a timeout
-  ;;(let [[value channel] (async/alts!! [results-chan (async/timeout report-timeout)])]
-  ;;  (when (= channel results-chan)
-  ;;    (recur value)))))
 
 ;;
 
@@ -473,7 +467,6 @@
   [& args]
   (let [[iiif-url msid] (parse-args args)]
 
-    (stderr "starting image search")
     (cond
       ;; add image to image-chan
       (some? iiif-url) (find-single-image iiif-url)
@@ -484,21 +477,15 @@
       ;; no args given, find all data
       :else (find-all))
 
-    (stderr "starting processor")
     ;; start processing images added by find-data
-    (run! process-images (range num-processors))
-    ;;(process-images "adhoc")
+    (run! image-processor (range num-processors))
 
-    (stderr "starting reporter")
     ;; polls the results channel and prints progress
     ;; will exit if no new results after `report-timeout` seconds
     (report)
 
-    (stderr "writing summary")
     ;; write the final set of stats to the report
     (log :report @stats)
 
-    (stderr "cleaning up")
     ;; clean up
-    (async/close! image-chan)
     (async/close! results-chan)))
