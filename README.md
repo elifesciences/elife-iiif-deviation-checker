@@ -9,4 +9,4 @@ Compares original image to image derived from Loris/IIIF for regressions.
 
 ## run
 
-    ./check.clj
+    ./run.clj
