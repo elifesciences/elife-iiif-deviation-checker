@@ -7,9 +7,7 @@
    [clojure.core.async :as async :refer [<! >! go-loop]]
    [cheshire.core :as json]))
 
-(defn json-parse-string
-  [string]
-  (json/parse-string string true))
+(def parse-json-string #(json/parse-string % true))
 
 (defn read-report
   "if a report exists, create an index of uri->md5 results so we don't have to process them again"
@@ -18,7 +16,7 @@
     (when (.exists report-file)
       (with-open [rdr (clojure.java.io/reader report-file)]
         (into {} (mapv (fn [result]
-                         (let [result (:message (json-parse-string result))]
+                         (let [result (:message (parse-json-string result))]
                            [(:uri (:source result)) (:md5 result)]))
                        (line-seq rdr)))))))
 
@@ -116,7 +114,7 @@
   (if (and (.exists (java.io.File. output-file))
            (> (.length (java.io.File. output-file)) 0))
     output-file
-    (let [{:keys [:exit :err :out]} (sh "curl" "--retry" "2" "-sS" url "--output" output-file)]
+    (let [{:keys [:exit :err]} (sh "curl" "--retry" "2" "-sS" url "--output" output-file)]
       (log :debug (format "cache miss for '%s': %s" url output-file))
       (if (zero? exit)
         output-file
@@ -188,7 +186,7 @@
   "given the manuscript ID `msid`, downloads the latest version of an elife article"
   [msid]
   (let [article-url (str "https://api.elifesciences.org/articles/" msid)]
-    (-> article-url GET json-parse-string)))
+    (-> article-url GET parse-json-string)))
 
 (defn articles
   "downloads a report from the Observer project and extracts the manuscript IDs of *all* published articles"
@@ -257,12 +255,10 @@
             "-quiet"
             image-path-1 image-path-2 comparison-file)
 
-        ;; 'ae' is Absolute Error - the number of pixels that are different between the two
-        ;; we're not really interested in this value
         ;; 'pae' is Peak Absolute Error, a value between 0 and 1 of the maximum difference between two pixels
         ;; 0 is perfectly identical and 1 is completely different
         ;; setting the fuzz factor to the `pae` value as a percentage will get you a successful result
-        [ae pae] (rest (re-matches #"(\d+) \((\d\.\d+)\)" err))
+        [_ pae] (rest (re-matches #"(\d+) \((\d\.\d+)\)" err))
         pae (some-> pae java.lang.Float/valueOf)]
     
     (cond
