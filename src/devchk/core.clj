@@ -240,7 +240,9 @@
 (defn find-single-article
   "adds all of the images in a single elife article to the `image-chan` for processing."
   [msid]
-  (find-images (get-article msid)))
+  (stderr "looking for article" msid)
+  (async/go
+    (find-images (get-article msid))))
 
 ;; image processing
 
