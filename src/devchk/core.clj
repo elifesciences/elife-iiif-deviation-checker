@@ -114,14 +114,18 @@
 (defn GET-binary
   "fetch url, write bytes to given `output-file`, returns `output-file` on success or `nil` on error."
   [url output-file]
-  (if (and (.exists (java.io.File. output-file))
-           (> (.length (java.io.File. output-file)) 0))
-    output-file
-    (let [{:keys [:exit :err]} (sh "curl" "--retry" "2" "-sS" url "--output" output-file)]
-      (log :debug (format "cache miss for '%s': %s" url output-file))
-      (if (zero? exit)
-        output-file
-        (log :error err)))))
+  (let [output-file (java.io.File. output-file)]
+    (if (and (.exists output-file)
+             (> (.length output-file) 0))
+      (str output-file) ;; non-zero cache-hit
+      (let [{:keys [:exit :err]} (sh "curl" "--fail" "--retry" "2" "-sS" url "--output" (str output-file))]
+        (log :debug (format "cache miss for '%s': %s" url output-file))
+        (if (zero? exit)
+          (str output-file)
+          (do
+            (log :error err)
+            (when (.exists output-file)
+              (.delete output-file))))))))
 
 (defn url?
   "predicate, returns `true` if given value can be parsed as a URL"
@@ -273,16 +277,14 @@
 
       ;; ImageMagick exited with a non-zero result.
       ;; this is not the first attempt so log the error and give up.
-      (> exit 1) (do
-                   (increment :num-errors)
-                   (log :error "imagemagick return an exit code greater than 1"
-                        {:stderr err
-                         :stdout out
-                         :exit exit
-                         :image-1 image-path-1
-                         :image-2 image-path-2}))
+      (> exit 1) (log :error "imagemagick return an exit code greater than 1"
+                      {:stderr err
+                       :stdout out
+                       :exit exit
+                       :image-1 image-path-1
+                       :image-2 image-path-2})
 
-      :else
+    :else
       {:pae pae
        :cache {:local-comparison-file comparison-file
                :local-original-file image-path-1
@@ -370,8 +372,7 @@
   (try
     (-process-image image)
     (catch Exception uncaught-exc
-      (log :error "uncaught exception processing image" {:image image :exc (str uncaught-exc)})
-      (increment :num-errors))))
+      (log :error "uncaught exception processing image" {:image image :exc (str uncaught-exc)}))))
 
 (defn image-processor
   "this will take images off of `image-chan` and 'processes' them - runs each image through a series of tests.
@@ -381,9 +382,9 @@
   (async/go-loop []
     (if-let [image (async/<! image-chan)]
       (let [result (process-image image)]
-        (when result
-          (log :debug (str "processor:" my-id " - processing image - " (:label image)))
-          (async/>! results-chan result))
+        (if result
+          (async/>! results-chan result)
+          (increment :num-errors))
         (increment :num-processed)
         (recur))
 
