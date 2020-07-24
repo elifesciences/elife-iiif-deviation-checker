@@ -12,7 +12,7 @@
 ;; number of parallel image processors to run, one per-core
 (def num-processors (-> (Runtime/getRuntime) .availableProcessors))
 
-(def use-prod-iiif true) ;; use the `iiif--prod` server
+(def use-prod-iiif false) ;; use the `iiif--prod` server
 (def clear-image-cache true) ;; set to false to preserve image cache (good for debugging)
 
 (def cache-root "") ;; "/ext/devchk/", when you need a different cache dir (ensure trailing slash)
@@ -25,11 +25,11 @@
 
 (def image-chan
   "this is where we'll put the image data we find that needs processing."
-  (async/chan 10))
+  (async/chan 1024))
 
 (def results-chan
   "this is where we'll put the results of processing images."
-  (async/chan 10))
+  (async/chan))
 
 (def stats
   "this is where we accumulate some ongoing stats about the state of the program as it's running."
@@ -201,7 +201,7 @@
   (let [url "https://observer.elifesciences.org/report/published-article-index.csv"
         csv-data (doall (csv/read-csv (GET url)))
         article-list (->> csv-data rest (map first)
-                          (take 20) ;; download N articles. disable this to download *all* articles
+                          ;;(take 20) ;; download N articles. disable this to download *all* articles
                           (map get-article))]
 
     ;; images are embedded throughout the article-json. we need to visit every value and look for these:
@@ -352,8 +352,8 @@
             iiif-image (download-image (if use-prod-iiif iiif-url local-iiif-url))]
 
         (cond
-          (not iiif-image) (log :error "problem downloading iiif image:" {:iiif-image iiif-image})
-          (not original-image) (log :error "problem downloading original image:" {:original-image original-image})
+          (not iiif-image) (log :error "problem downloading iiif image:" {:iiif-image iiif-url})
+          (not original-image) (log :error "problem downloading original image:" {:original-image original-image-url})
 
           :else
           (let [iiif-meta (-> iiif-image image-meta (assoc :local-uri local-iiif-url))
