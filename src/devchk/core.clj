@@ -280,12 +280,13 @@
                          :stdout out
                          :exit exit
                          :image-1 image-path-1
-                         :image-2 image-path-2})))
+                         :image-2 image-path-2}))
 
-    {:pae pae
-     :cache {:local-comparison-file comparison-file
-             :local-original-file image-path-1
-             :local-iiif-file image-path-2}}))
+      :else
+      {:pae pae
+       :cache {:local-comparison-file comparison-file
+               :local-original-file image-path-1
+               :local-iiif-file image-path-2}})))
 
 (defn image-cache-path
   "images must be stored on the disk long enough to compare them with the iiif derived image.
@@ -356,14 +357,13 @@
           (let [iiif-meta (-> iiif-image image-meta (assoc :local-uri local-iiif-url))
                 original-meta (image-meta original-image)
 
-                article-id (->> iiif-url (re-find #"elife\-(\d{5})\-") last java.lang.Integer/valueOf)
-                comparison-results (compare-images original-image iiif-image)
-
-                result (merge image original-meta)
-                result (merge result {:uri original-image-url :article-id article-id})
-                result (update-in result [:source] merge iiif-meta)
-                result (merge result comparison-results)]
-            result))))))
+                article-id (->> iiif-url (re-find #"elife\-(\d{5})\-") last java.lang.Integer/valueOf)]
+            (when-let [comparison-results (compare-images original-image iiif-image)]
+              (let [result (merge image original-meta)
+                    result (merge result {:uri original-image-url :article-id article-id})
+                    result (update-in result [:source] merge iiif-meta)
+                    result (merge result comparison-results)]
+                result))))))))
 
 (defn process-image
   [image]
