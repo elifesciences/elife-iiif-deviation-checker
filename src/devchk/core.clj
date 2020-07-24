@@ -7,20 +7,7 @@
    [clojure.core.async :as async :refer [<! >! go-loop]]
    [cheshire.core :as json]))
 
-(def parse-json-string #(json/parse-string % true))
-
-(defn read-report
-  "if a report exists, create an index of uri->md5 results so we don't have to process them again"
-  []
-  (let [report-file (java.io.File. "report.json")]
-    (when (.exists report-file)
-      (with-open [rdr (clojure.java.io/reader report-file)]
-        (into {} (mapv (fn [result]
-                         (let [result (:message (parse-json-string result))]
-                           [(:uri (:source result)) (:md5 result)]))
-                       (line-seq rdr)))))))
-
-(def report-idx (read-report))
+(defn abs-path [path] (-> path java.io.File. .getAbsolutePath str))
 
 ;; number of parallel image processors to run, one per-core
 (def num-processors (-> (Runtime/getRuntime) .availableProcessors))
@@ -29,12 +16,12 @@
 (def clear-image-cache true) ;; set to false to preserve image cache (good for debugging)
 
 (def cache-root "") ;; "/ext/devchk/", when you need a different cache dir (ensure trailing slash)
-(def cache-dir (-> cache-root (str "cache") java.io.File. .getAbsolutePath str)) ;; "/path/to/cache"
-(def image-cache-dir (-> cache-root (str "image-cache") java.io.File. .getAbsolutePath str)) ;; "/path/to/cache/image-cache"
+(def cache-dir (-> cache-root (str "cache") abs-path)) ;; "/path/to/cache"
+(def image-cache-dir (-> cache-root (str "image-cache") abs-path)) ;; "/path/to/cache/image-cache"
+(def log-cache-dir (-> cache-root (str "logs") abs-path)) ;; "/path/to/cache/logs"
 
-;; create our cache dirs, if they don't already exist
-(-> cache-dir java.io.File. .mkdirs)
-(-> image-cache-dir java.io.File. .mkdirs)
+;; create our cache dirs
+(run! (fn [path] (.mkdirs (java.io.File. path))) [cache-dir image-cache-dir log-cache-dir])
 
 (def image-chan
   "this is where we'll put the image data we find that needs processing."
@@ -50,6 +37,22 @@
          :num-processed 0  ;; number of images processed
          :num-deviations 0 ;; number of deviations we've found
          :num-errors 0}))  ;; number of errors encountered processing images
+
+(defn parse-json-string [string] (json/parse-string string true))
+(defn log-file [level] (str log-cache-dir "/" (-> level name (str ".json"))))
+
+(defn read-report
+  "if a report exists, create an index of uri->md5 results so we don't have to process them again"
+  []
+  (let [report-file (-> :report log-file java.io.File.)]
+    (when (.exists report-file)
+      (with-open [rdr (clojure.java.io/reader report-file)]
+        (into {} (mapv (fn [result]
+                         (let [result (:message (parse-json-string result))]
+                           [(:uri (:source result)) (:md5 result)]))
+                       (line-seq rdr)))))))
+
+(def report-idx (read-report))
 
 ;; utils
 
@@ -72,7 +75,7 @@
     "synchronised file writing. ensures everybody gets a line to themselves"
     [level & args]
     (locking lock
-      (let [filename (-> level name (str ".json"))
+      (let [filename (log-file level) ;; "/path/to/cache/logs/debug.json"
             extra (rest args)
             msg (json/generate-string (if (not (empty? extra))
                                         {:message (first args) :extra extra}
