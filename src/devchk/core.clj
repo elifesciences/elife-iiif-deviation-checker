@@ -361,10 +361,10 @@
       (let [original-image-url (iiif-to-s3-url iiif-url)
             original-image (download-image original-image-url)
             local-iiif-url (str "http://localhost" (-> iiif-url java.net.URL. .getPath))
-            iiif-image (download-image (if use-prod-iiif iiif-url local-iiif-url))]
-
+            url-to-use (if use-prod-iiif iiif-url local-iiif-url)
+            iiif-image (download-image url-to-use)]
         (cond
-          (not iiif-image) (log :error "problem downloading iiif image:" {:iiif-image iiif-url})
+          (not iiif-image) (log :error "problem downloading iiif image:" {:iiif-image url-to-use})
           (not original-image) (log :error "problem downloading original image:" {:original-image original-image-url})
 
           :else
