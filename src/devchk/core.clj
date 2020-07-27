@@ -20,6 +20,8 @@
 (def image-cache-dir (-> cache-root (str "image-cache") abs-path)) ;; "/path/to/cache/image-cache"
 (def log-cache-dir (-> cache-root (str "logs") abs-path)) ;; "/path/to/cache/logs"
 
+(def deviation-threshold 0.9) ;; '1' is completely different, '0' is identical
+
 ;; create our cache dirs
 (run! (fn [path] (.mkdirs (java.io.File. path))) [cache-dir image-cache-dir log-cache-dir])
 
@@ -49,7 +51,7 @@
       (with-open [rdr (clojure.java.io/reader report-file)]
         (into {} (mapv (fn [result]
                          (let [result (:message (parse-json-string result))]
-                           [(:uri (:source result)) (:md5 result)]))
+                           [(:uri (:source result)) (:pae result)]))
                        (line-seq rdr)))))))
 
 (def report-idx (read-report))
@@ -284,7 +286,7 @@
                        :image-1 image-path-1
                        :image-2 image-path-2})
 
-    :else
+      :else
       {:pae pae
        :cache {:local-comparison-file comparison-file
                :local-original-file image-path-1
@@ -401,8 +403,7 @@
   (loop []
     (when-let [result (async/<!! results-chan)]
       ;; check for deviations
-      (if (or (= (:pae result) 1)
-              (= (:pae result) 1.0))
+      (if (>= (:pae result) deviation-threshold)
         (increment :num-deviations)
 
         ;; no errors to investigate, delete the cached files
