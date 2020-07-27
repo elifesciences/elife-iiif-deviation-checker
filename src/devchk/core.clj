@@ -343,7 +343,7 @@
 
 (defn deviation-check
   [val]
-  (when (>= val deviation-threshold)
+  (when (and val (>= val deviation-threshold))
     (increment :num-deviations)))
 
 (defn -process-image
