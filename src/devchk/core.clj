@@ -341,12 +341,20 @@
     {:bytes (.length img-obj)
      :md5 (first (split (:out (sh "md5sum" "--binary" image-path)) #" "))}))
 
+(defn deviation-check
+  [val]
+  (when (>= val deviation-threshold)
+    (increment :num-deviations)))
+
 (defn -process-image
   "given an `image`, generates urls, downloads the images, compares them, tacks on extra image data and returns a map of results"
   [image]
   (let [iiif-url (-> image :source :uri)]
     (if (contains? report-idx iiif-url)
-      (log :debug "skipping" iiif-url) ;; already have a result for this one
+      (do
+        (log :debug "skipping" iiif-url) ;; already have a result for this one
+        (deviation-check (get report-idx iiif-url))
+        :no-op)
 
       (let [original-image-url (iiif-to-s3-url iiif-url)
             original-image (download-image original-image-url)
@@ -360,8 +368,8 @@
           :else
           (let [iiif-meta (-> iiif-image image-meta (assoc :local-uri local-iiif-url))
                 original-meta (image-meta original-image)
-
                 article-id (->> iiif-url (re-find #"elife\-(\d{5})\-") last java.lang.Integer/valueOf)]
+
             (when-let [comparison-results (compare-images original-image iiif-image)]
               (let [result (merge image original-meta)
                     result (merge result {:uri original-image-url :article-id article-id})
@@ -396,29 +404,35 @@
 
 ;; reporting
 
+(defn report-stats
+  []
+  (stderr (select-keys @stats [:num-images :num-processed :num-errors :num-deviations])))
+
 (defn report
   "this takes results off of `results-chan` and writes a report to stdout as they are processed.
   we do this on the main thread so it blocks us from exiting until we have no more results left."
   []
   (loop []
     (when-let [result (async/<!! results-chan)]
-      ;; check for deviations
-      (if (>= (:pae result) deviation-threshold)
-        (increment :num-deviations)
+      (if (= result :no-op)
+        (do
+          (report-stats) ;; print *something* to know we're working
+          (recur))
 
-        ;; no errors to investigate, delete the cached files
-        (when clear-image-cache
-          (some-> result :cache :local-comparison-file delete-file)
-          (some-> result :cache :local-iiif-file delete-file)
-          (some-> result :cache :local-original-file delete-file)))
+        (do
+          (deviation-check (:pae result))
+          (when clear-image-cache
+            (some-> result :cache :local-comparison-file delete-file)
+            (some-> result :cache :local-iiif-file delete-file)
+            (some-> result :cache :local-original-file delete-file))
 
-      (let [stats @stats
-            num-remaining (- (:num-images stats)
-                             (:num-processed stats))]
-        (stderr (select-keys stats [:num-images :num-processed :num-errors :num-deviations]))
-        (log :report result)
-        (when-not (= num-remaining 0)
-          (recur))))))
+          (let [stats @stats
+                num-remaining (- (:num-images stats)
+                                 (:num-processed stats))]
+            (report-stats)
+            (log :report result)
+            (when-not (= num-remaining 0)
+              (recur))))))))
 
 ;; bootstrap
 
