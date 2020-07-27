@@ -350,7 +350,8 @@
   "given an `image`, generates urls, downloads the images, compares them, tacks on extra image data and returns a map of results"
   [image]
   (let [iiif-url (-> image :source :uri)]
-    (if (contains? report-idx iiif-url)
+    (if (and (contains? report-idx iiif-url)
+             (not (nil? (get report-idx iiif-url))))
       (do
         (log :debug "skipping" iiif-url) ;; already have a result for this one
         (deviation-check (get report-idx iiif-url))
@@ -382,7 +383,8 @@
   (try
     (-process-image image)
     (catch Exception uncaught-exc
-      (log :error "uncaught exception processing image" {:image image :exc (str uncaught-exc)}))))
+      (log :error "uncaught exception processing image" {:image image :exc (str uncaught-exc)
+                                                         :st (mapv str (.getStackTrace uncaught-exc))}))))
 
 (defn image-processor
   "this will take images off of `image-chan` and 'processes' them - runs each image through a series of tests.
