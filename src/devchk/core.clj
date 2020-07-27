@@ -20,7 +20,7 @@
 (def image-cache-dir (-> cache-root (str "image-cache") abs-path)) ;; "/path/to/cache/image-cache"
 (def log-cache-dir (-> cache-root (str "logs") abs-path)) ;; "/path/to/cache/logs"
 
-(def deviation-threshold 0.9) ;; '1' is completely different, '0' is identical
+(def deviation-threshold 1) ;; '1' is completely different, '0' is identical
 
 ;; create our cache dirs
 (run! (fn [path] (.mkdirs (java.io.File. path))) [cache-dir image-cache-dir log-cache-dir])
@@ -54,7 +54,7 @@
                            [(:uri (:source result)) (:pae result)]))
                        (line-seq rdr)))))))
 
-(def report-idx (read-report))
+(def report-idx (atom nil))
 
 ;; utils
 
@@ -343,18 +343,19 @@
 
 (defn deviation-check
   [val]
-  (when (and val (>= val deviation-threshold))
-    (increment :num-deviations)))
+  (let [deviant (and val (>= val deviation-threshold))]
+    (when deviant (increment :num-deviations))
+    deviant))
 
 (defn -process-image
   "given an `image`, generates urls, downloads the images, compares them, tacks on extra image data and returns a map of results"
   [image]
   (let [iiif-url (-> image :source :uri)]
-    (if (and (contains? report-idx iiif-url)
-             (not (nil? (get report-idx iiif-url))))
+    (if (and (contains? @report-idx iiif-url)
+             (not (nil? (get @report-idx iiif-url))))
       (do
         (log :debug "skipping" iiif-url) ;; already have a result for this one
-        (deviation-check (get report-idx iiif-url))
+        (deviation-check (get @report-idx iiif-url))
         :no-op)
 
       (let [original-image-url (iiif-to-s3-url iiif-url)
@@ -421,20 +422,20 @@
           (report-stats) ;; print *something* to know we're working
           (recur))
 
-        (do
-          (deviation-check (:pae result))
-          (when clear-image-cache
+        (let [deviant (deviation-check (:pae result))
+              stats @stats
+              num-remaining (- (:num-images stats)
+                               (:num-processed stats))]
+          (when (and clear-image-cache
+                     (not deviant))
             (some-> result :cache :local-comparison-file delete-file)
             (some-> result :cache :local-iiif-file delete-file)
             (some-> result :cache :local-original-file delete-file))
 
-          (let [stats @stats
-                num-remaining (- (:num-images stats)
-                                 (:num-processed stats))]
-            (report-stats)
-            (log :report result)
-            (when-not (= num-remaining 0)
-              (recur))))))))
+          (report-stats)
+          (log :report result)
+          (when-not (= num-remaining 0)
+            (recur)))))))
 
 ;; bootstrap
 
@@ -451,8 +452,10 @@
   (let [[iiif-url msid] (parse-args args)]
     (cond
       (some? iiif-url) (find-single-image iiif-url)
-      (some? msid) (find-single-article msid)
-      :else (find-all))
+      (some? msid) (mapv find-single-article args)
+      :else (do
+              (reset! report-idx (read-report))
+              (find-all)))
 
     ;; start processing images added by the find-* functions
     (run! image-processor (range num-processors))
