@@ -12,8 +12,8 @@
 ;; number of parallel image processors to run, one per-core
 (def num-processors (-> (Runtime/getRuntime) .availableProcessors))
 
-(def use-prod-iiif false) ;; use the `iiif--prod` server
-(def clear-image-cache true) ;; set to false to preserve image cache (good for debugging)
+(def use-prod-iiif? false) ;; use the `iiif--prod` server
+(def clear-image-cache? true) ;; set to false to preserve image cache (good for debugging)
 
 (def cache-root "") ;; "/ext/devchk/", when you need a different cache dir (ensure trailing slash)
 (def cache-dir (-> cache-root (str "cache") abs-path)) ;; "/path/to/cache"
@@ -343,9 +343,9 @@
 
 (defn deviation-check
   [val]
-  (let [deviant (and val (>= val deviation-threshold))]
-    (when deviant (increment :num-deviations))
-    deviant))
+  (let [deviant? (and val (>= val deviation-threshold))]
+    (when deviant? (increment :num-deviations))
+    deviant?))
 
 (defn -process-image
   "given an `image`, generates urls, downloads the images, compares them, tacks on extra image data and returns a map of results"
@@ -361,7 +361,7 @@
       (let [original-image-url (iiif-to-s3-url iiif-url)
             original-image (download-image original-image-url)
             local-iiif-url (str "http://localhost" (-> iiif-url java.net.URL. .getPath))
-            url-to-use (if use-prod-iiif iiif-url local-iiif-url)
+            url-to-use (if use-prod-iiif? iiif-url local-iiif-url)
             iiif-image (download-image url-to-use)]
         (cond
           (not iiif-image) (log :error "problem downloading iiif image:" {:iiif-image url-to-use})
@@ -411,6 +411,13 @@
   []
   (stderr (select-keys @stats [:num-images :num-processed :num-errors :num-deviations])))
 
+(defn done? 
+  []
+  (let [stats @stats]
+    (= 0 (- (:num-images stats) (:num-processed stats)))))
+
+(defn sleep [n] (Thread/sleep n) true)
+
 (defn report
   "this takes results off of `results-chan` and writes a report to stdout as they are processed.
   we do this on the main thread so it blocks us from exiting until we have no more results left."
@@ -422,19 +429,18 @@
           (report-stats) ;; print *something* to know we're working
           (recur))
 
-        (let [deviant (deviation-check (:pae result))
-              stats @stats
-              num-remaining (- (:num-images stats)
-                               (:num-processed stats))]
-          (when (and clear-image-cache
-                     (not deviant))
+        (do
+          (deviation-check (:pae result))
+          (when clear-image-cache?
             (some-> result :cache :local-comparison-file delete-file)
             (some-> result :cache :local-iiif-file delete-file)
             (some-> result :cache :local-original-file delete-file))
-
           (report-stats)
           (log :report result)
-          (when-not (= num-remaining 0)
+
+          ;; if we think we're done, wait a little bit and test again.
+          ;; we could be processing the old report too fast.
+          (if (not (and (done?) (sleep 500) (done?)))
             (recur)))))))
 
 ;; bootstrap
