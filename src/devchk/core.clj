@@ -440,7 +440,7 @@
 
           ;; if we think we're done, wait a little bit and test again.
           ;; we could be processing the old report too fast.
-          (if (not (and (done?) (sleep 500) (done?)))
+          (if (not (and (done?) (sleep 100) (done?)))
             (recur)))))))
 
 ;; bootstrap
